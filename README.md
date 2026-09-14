@@ -61,6 +61,10 @@ npm run check   # tsc --noEmit && wrangler deploy --dry-run
   ごとに分割し、`TTS_CONCURRENCY`（既定 3）本まで並列に呼び出して、順序を保ったまま
   結合します。どちらも `wrangler.jsonc` の `vars` か Secret で上書きできます。
   429 / 5xx は 2 回までリトライします。
+- 音声は 24 kHz / 16 bit PCM なので、文章 1 分あたり約 3 MB になります（元記事は約 25 MB）。
+  Worker の CPU 時間とメモリ（128 MB）に収めるため、SSE の行分割はバイト単位で 1 回だけ
+  デコードし、base64 は `nodejs_compat` の `Buffer` でネイティブに復号し、送信済みチャンクは
+  即座に解放しています。上限超過時は Cloudflare が JSON でない 503（Error 1102）を返します。
 - チャンク境界では話速や間が少し変わることがあります。気になる場合は
   `TTS_CHUNK_CHARS` を大きくしてください（100 秒以内に 1 チャンクが生成できる範囲で）。
 - ストリーミング中は WAV の長さが確定しないため、Worker が書くヘッダの RIFF / data

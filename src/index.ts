@@ -23,6 +23,8 @@
  * players accept). The browser client patches them once the download ends.
  */
 
+import { Buffer } from "node:buffer";
+
 export interface Env {
   GEMINI_API_KEY: string;
   /** Optional override, mainly for tests. Defaults to the public Gemini API. */
@@ -285,7 +287,7 @@ export async function* inOrder<T, R>(
   concurrency: number,
   fn: (item: T) => Promise<R>,
 ): AsyncGenerator<R> {
-  const inflight: Promise<R>[] = [];
+  const inflight: Array<Promise<R> | undefined> = [];
   let next = 0;
   const start = () => {
     if (next >= items.length) return;
@@ -295,7 +297,8 @@ export async function* inOrder<T, R>(
   };
   for (let i = 0; i < Math.max(1, concurrency); i++) start();
   for (let i = 0; i < items.length; i++) {
-    const r = await inflight[i];
+    const r = await inflight[i]!;
+    inflight[i] = undefined; // release the result (megabytes of PCM) once handed out
     start();
     yield r;
   }
@@ -367,11 +370,38 @@ async function upstreamErrorMessage(res: Response): Promise<string> {
   return `HTTP ${res.status}`;
 }
 
-/** Yields one parsed JSON object per `data:` line of a text/event-stream body. */
+/**
+ * Yields one parsed JSON object per `data:` line of a text/event-stream body.
+ *
+ * Lines are split at the byte level and each line is decoded exactly once.
+ * Gemini TTS sends multi-megabyte lines (a whole chunk's audio as base64), so
+ * string concatenation with a rescan per read would be quadratic.
+ */
 export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<GeminiEvent> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
-  let buffer = "";
+  let pending: Uint8Array[] = [];
+  let pendingBytes = 0;
+
+  const takeLine = (tail: Uint8Array): string => {
+    let bytes: Uint8Array;
+    if (pending.length === 0) {
+      bytes = tail;
+    } else {
+      bytes = new Uint8Array(pendingBytes + tail.byteLength);
+      let offset = 0;
+      for (const c of pending) {
+        bytes.set(c, offset);
+        offset += c.byteLength;
+      }
+      bytes.set(tail, offset);
+      pending = [];
+      pendingBytes = 0;
+    }
+    if (bytes.byteLength > 0 && bytes[bytes.byteLength - 1] === 0x0d) bytes = bytes.subarray(0, -1);
+    return decoder.decode(bytes);
+  };
+
   const parseLine = (line: string): GeminiEvent | undefined => {
     if (!line.startsWith("data:")) return undefined;
     const payload = line.slice(5).trim();
@@ -383,21 +413,27 @@ export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerato
       return undefined;
     }
   };
+
   try {
     for (;;) {
       const { value, done } = await reader.read();
-      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buffer.indexOf("\n")) !== -1) {
-        const ev = parseLine(buffer.slice(0, nl).replace(/\r$/, ""));
-        buffer = buffer.slice(nl + 1);
+      if (done) break;
+      let rest = value;
+      for (;;) {
+        const nl = rest.indexOf(0x0a);
+        if (nl === -1) break;
+        const ev = parseLine(takeLine(rest.subarray(0, nl)));
+        rest = rest.subarray(nl + 1);
         if (ev) yield ev;
       }
-      if (done) {
-        const ev = parseLine(buffer.replace(/\r$/, ""));
-        if (ev) yield ev;
-        return;
+      if (rest.byteLength > 0) {
+        pending.push(rest);
+        pendingBytes += rest.byteLength;
       }
+    }
+    if (pendingBytes > 0) {
+      const ev = parseLine(takeLine(new Uint8Array(0)));
+      if (ev) yield ev;
     }
   } finally {
     reader.releaseLock();
@@ -464,10 +500,9 @@ function writeAscii(view: DataView, offset: number, s: string): void {
 }
 
 function base64ToBytes(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
+  // Native decoder (nodejs_compat); a JS loop over ~30 MB of audio is far too slow.
+  const buf = Buffer.from(b64, "base64");
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
 }
 
 function timestamp(): string {
