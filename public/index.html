@@ -213,7 +213,7 @@ AI製品の本体は、もうモデル名ではない
 
     submit.disabled = true;
     result.classList.remove("show");
-    setStatus("生成中… 長い文章では 1 分ほどかかることがあります。");
+    setStatus("生成中… 最初の音声が届くまで数秒かかります。");
     const started = Date.now();
 
     try {
@@ -234,7 +234,28 @@ AI製品の本体は、もうモデル名ではない
         throw new Error(msg);
       }
 
-      const blob = await res.blob();
+      // The Worker streams the WAV as it is synthesized, with the RIFF/data
+      // size fields set to 0xFFFFFFFF (unknown). Collect the chunks, then
+      // patch the sizes so the download is a well-formed file.
+      const chunks = [];
+      let received = 0;
+      const reader = res.body.getReader();
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+        setStatus(`受信中… ${(received / 1024).toFixed(0)} KB`);
+      }
+      const wav = new Uint8Array(received);
+      let offset = 0;
+      for (const c of chunks) { wav.set(c, offset); offset += c.byteLength; }
+      if (wav.byteLength >= 44) {
+        const v = new DataView(wav.buffer);
+        v.setUint32(4, wav.byteLength - 8, true);
+        v.setUint32(40, wav.byteLength - 44, true);
+      }
+      const blob = new Blob([wav], { type: "audio/wav" });
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       objectUrl = URL.createObjectURL(blob);
       player.src = objectUrl;
