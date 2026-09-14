@@ -11,6 +11,8 @@ Web アプリとして移植したものです。
   `responseModalities: ["AUDIO"]`) に並列で投げます。届いた PCM (`audio/L16;rate=24000`)
   を入力順に WAV ヘッダ付きでブラウザへストリーミングします。API キーはブラウザに露出しません。
 
+設計や内部構造、運用の詳細は [docs/TECHNICAL.md](docs/TECHNICAL.md) を参照してください。
+
 ## API
 
 | Method | Path          | 説明 |
@@ -49,8 +51,11 @@ npm run deploy
 ### 検証
 
 ```sh
-npm run check   # tsc --noEmit && wrangler deploy --dry-run
+npm test        # ユニットテスト（Node 22+）
+npm run check   # tsc --noEmit && wrangler deploy --dry-run && npm test
 ```
+
+実 API を使わない E2E テスト（モックサーバー）は `test/mock-gemini.mjs` のコメントを参照してください。
 
 ## 補足
 
