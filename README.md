@@ -73,4 +73,5 @@ npm run check   # tsc --noEmit && wrangler deploy --dry-run
   `ffmpeg -i in.wav -c copy out.wav` で正規化してください。
 - Cloudflare Access で保護している場合、curl からはサービストークン
   (`CF-Access-Client-Id` / `CF-Access-Client-Secret` ヘッダ) が必要です。
-- 対応モデル: `gemini-2.5-pro-preview-tts`, `gemini-2.5-flash-preview-tts`。
+- 対応モデル: `gemini-2.5-pro-preview-tts`, `gemini-2.5-flash-preview-tts`, `gemini-3.1-flash-tts-preview`。
+  無料枠の日次上限はモデルごとに別なので、上限に当たったら別モデルに切り替えられます。

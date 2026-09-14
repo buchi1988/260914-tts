@@ -41,6 +41,7 @@ const DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const MODELS = [
   "gemini-2.5-pro-preview-tts",
   "gemini-2.5-flash-preview-tts",
+  "gemini-3.1-flash-tts-preview",
 ] as const;
 
 const VOICES = [
