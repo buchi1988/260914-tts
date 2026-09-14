@@ -6,10 +6,10 @@ Web アプリとして移植したものです。
 
 - **フロントエンド** (`public/index.html`): テキスト・ボイス・モデルを指定して生成、
   ブラウザで再生 / WAV ダウンロード。Workers Static Assets で配信。
-- **Worker** (`src/index.ts`): Gemini のストリーミング REST API
-  (`streamGenerateContent?alt=sse`, `responseModalities: ["AUDIO"]`) を呼び出し、
-  届いた PCM (`audio/L16;rate=24000`) チャンクを WAV ヘッダ付きでそのままブラウザへ
-  ストリーミングします。API キーはブラウザに露出しません。
+- **Worker** (`src/index.ts`): テキストを文の区切りで数百文字ずつに分割し、各チャンクを
+  Gemini のストリーミング REST API (`streamGenerateContent?alt=sse`,
+  `responseModalities: ["AUDIO"]`) に並列で投げます。届いた PCM (`audio/L16;rate=24000`)
+  を入力順に WAV ヘッダ付きでブラウザへストリーミングします。API キーはブラウザに露出しません。
 
 ## API
 
@@ -55,9 +55,14 @@ npm run check   # tsc --noEmit && wrangler deploy --dry-run
 ## 補足
 
 - 入力は最大 20,000 文字に制限しています（`src/index.ts` の `MAX_TEXT_LENGTH`）。
-- 長文では生成に数分かかることがあります。Cloudflare は約 100 秒間 1 バイトも
-  返さないオリジンを HTTP 524 で切断するため、Gemini 呼び出しとクライアントへの
-  応答の両方をストリーミングにしています（最初の音声チャンクは数秒で届きます）。
+- Cloudflare は約 100 秒間 1 バイトも返さないオリジンを HTTP 524 で切断します。Gemini の
+  TTS モデルは SSE でも音声全体ができるまで何も返さないため、長文を 1 回で投げると
+  必ずこれに当たります。そのため Worker はテキストを `TTS_CHUNK_CHARS`（既定 300 文字）
+  ごとに分割し、`TTS_CONCURRENCY`（既定 3）本まで並列に呼び出して、順序を保ったまま
+  結合します。どちらも `wrangler.jsonc` の `vars` か Secret で上書きできます。
+  429 / 5xx は 2 回までリトライします。
+- チャンク境界では話速や間が少し変わることがあります。気になる場合は
+  `TTS_CHUNK_CHARS` を大きくしてください（100 秒以内に 1 チャンクが生成できる範囲で）。
 - ストリーミング中は WAV の長さが確定しないため、Worker が書くヘッダの RIFF / data
   サイズは `0xFFFFFFFF`（長さ不明）です。ブラウザ側 (`public/index.html`) が受信完了後に
   正しい値へ書き換えます。curl で保存したファイルはヘッダがそのままなので、必要なら
