@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gemini TTS</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --fg: #1c1e21;
+      --muted: #5f6368;
+      --border: #d9dce1;
+      --accent: #1a73e8;
+      --accent-fg: #ffffff;
+      --error-bg: #fdecea;
+      --error-fg: #b3261e;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #121417;
+        --card: #1c1f24;
+        --fg: #e8eaed;
+        --muted: #9aa0a6;
+        --border: #3c4043;
+        --accent: #8ab4f8;
+        --accent-fg: #0b1a33;
+        --error-bg: #3b1f1f;
+        --error-fg: #f2b8b5;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px 16px 48px;
+      background: var(--bg);
+      color: var(--fg);
+      font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Sans", "Noto Sans JP", sans-serif;
+    }
+    main { max-width: 860px; margin: 0 auto; }
+    h1 { font-size: 1.5rem; margin: 0 0 4px; }
+    .sub { color: var(--muted); margin: 0 0 20px; font-size: 0.95rem; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+    }
+    label { display: block; font-weight: 600; margin-bottom: 6px; }
+    textarea, select, input[type=number] {
+      width: 100%;
+      font: inherit;
+      color: inherit;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
+    textarea { min-height: 320px; resize: vertical; line-height: 1.7; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 16px; }
+    .row > div { flex: 1 1 180px; }
+    .actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 20px; }
+    button {
+      font: inherit;
+      font-weight: 600;
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: 0;
+      border-radius: 8px;
+      padding: 10px 20px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.6; cursor: progress; }
+    .count { color: var(--muted); font-size: 0.9rem; }
+    #status { margin-top: 16px; color: var(--muted); }
+    #status.error {
+      background: var(--error-bg);
+      color: var(--error-fg);
+      border-radius: 8px;
+      padding: 10px 12px;
+      white-space: pre-wrap;
+    }
+    #result { margin-top: 20px; display: none; }
+    #result.show { display: block; }
+    audio { width: 100%; margin-bottom: 12px; }
+    a.download {
+      display: inline-block;
+      color: var(--accent);
+      font-weight: 600;
+      text-decoration: none;
+    }
+    footer { margin-top: 24px; color: var(--muted); font-size: 0.85rem; }
+    footer a { color: inherit; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Gemini TTS</h1>
+  <p class="sub">テキストを Gemini の音声合成モデルで読み上げ、WAV としてダウンロードできます。</p>
+
+  <form id="form" class="card">
+    <label for="text">読み上げるテキスト</label>
+    <textarea id="text" name="text" required spellcheck="false">## Transcript:
+「中国国産AI」の箱を開けたら、Claudeが入っていた件について
+中国が管理している国内の倉庫を開けたら、実は米国の倉庫だった、ということなのだろうか。2026年9月10日、Anthropicは脅威インテリジェンス報告書を公表し、中国の複数のAIラボがClaudeの能力を無断で利用していたと主張した。
+
+AI業界では、高性能な他社モデルに大量の質問を投げ、その回答を自社モデルの訓練に使う「蒸留」が以前から問題になっているので、その意味では、今回も米中AI競争の一幕に見えるのだが、この報告書を読むと、話はそこで終わらない。一部の中国製AIサービスが、利用者から受け取った実際の入力をClaudeへ送り、返ってきた答えを自社サービスの回答として返していたというのである。これが事実なら、問題の核心は「性能を盗んだ」ことではない。利用者が預けた情報の行き先が、本人の知らないところで反対方向へ向かっていたことだ。
+
+蒸留より重い「中継」の問題
+まず基本。モデルを学習させるための蒸留と、実際の利用者の入力を外部モデルへ中継することは、似ているようでまったく別の問題である。Anthropicによれば、AlibabaのQwen、Moonshot AIのKimi、DeepSeek、Xiaomi、ZhipuなどがClaudeへ大規模にアクセスし、その出力を自社モデルの能力向上に利用していた。
+
+Alibaba関連だけでも、2026年5月から7月に約1億5100万回のやり取りがあったとされる。偽アカウントやプロキシを使い、中国からの直接利用を制限する仕組みを迂回したというのがAnthropic側の説明だ。これが事実なら利用規約や競争上の公正さをめぐる問題にはなるが、基本的にはAI企業同士の争いである。
+
+ところが、KimiとDeepSeekについて報告されたもう一つの行為は、その枠をはみ出している。Anthropicは、両サービスが一部の顧客リクエストを自社モデルで処理せずClaudeへ送り、その回答を自社のものとして利用者へ返していたとする。
+
+Moonshotでは、ある10日間だけで約30万件、5月から7月の期間全体では約2300万件、DeepSeekでは7月の14日間で約1210万件に達したという。利用者から見れば、中国企業が提供するAIに質問をしている。しかし裏側では、その質問が利用者の選んでいない米国企業のモデルへ渡っていたことになる。
+
+Anthropicは、MoonshotやDeepSeekがこの仕組みを顧客に開示していたかどうかは確認できないとしているので、現時点では「秘密裏に転送していた」とまで断定するのは早いが、開示されていなかった場合の意味は重い。AIへの入力が単なる検索語ではないからである。企業が生成AIを業務に組み込めば、そこにはソースコード、社内文書、顧客情報、ログ、認証情報などが流れ込む。行政や軍、安全保障関連の組織が使えば、監視情報や捜査情報まで入り得る。つまり、どのモデルが答えを生成するかは単なる製品仕様ではなく、それは「誰に情報を預けているか」というデータガバナンスそのものなのである。
+
+「中国国産だから安全」が逆転する
+今回の報告で最も皮肉なのは、中国側が国産AIを必要としてきた理由そのものが、外部モデルへの中継によって崩れたことだ。AIの国産化には、外国技術への依存を減らすという産業政策上の意味がある。同時に、安全保障上は、機微情報を外国企業の管理下へ置かないという意味も持つ。だから政府機関や重要インフラ企業が「国内企業のAIだから使える」と判断することには、一定の合理性がある。
+
+ところが、その国産AIの裏側でClaudeが動いていたとすれば、構図は反転する。米国企業のAIへ機密情報を直接入力することを避けるために国産AIを選び、その国産AIを通じて結局米国企業へ情報が送られる。入口だけを国内化し、出口は国外につながっていたことになる。外国製モデルから能力を取り込もうとした結果、自分たちのデータまで相手側へ運んでしまう。今回の報告が妙に寓話的なのは、このねじれにある。
+
+実際、Anthropicが示した事例には、そのねじれが最も危険な形で現れている。同社によれば、Kimiの利用者の一人で、Anthropicが人民解放軍との関係がある可能性が高いと評価した人物が、成都にある数百台の監視カメラ映像を分析させようとしていた。特定人物の行動に異常がないかを判定するためで、映像には人民解放軍関連施設、中国電子科技集団系の研究所、大型国有企業周辺のカメラが含まれていたという。ほかにも、エンジニアが社内コードや有効な認証情報を入力した例や、DeepSeek経由のリクエストに公安向けシステム、ロシア国防関連データベースの認証情報が含まれていた例が報告されている。
+
+重要なのは、こうした情報が「大量に」流れたかどうかではない。重要なのは、機密管理は、一件でも本来届くべきでない相手に届けば事故は成立するという点だ。100万件中の1件だから軽い、という種類の問題ではない。むしろ、利用者が転送先を知らない仕組みでは、どの入力が危険なのかを利用者自身が判断できないことの深刻さである。企業秘密も個人情報も監視データも、入力する時点では「この会社に預ける」と判断している。その判断の前提が、裏側で勝手に差し替えられていたかもしれないのである。
+
+能力だけを抜けば、安全装置は残らない
+もう一つ見落とせないのが、蒸留そのものが持つ安全上の非対称性である。高性能モデルの回答を大量に集めれば、その能力の一部を別のモデルへ移すことはできる。しかし、元のモデルが備えていた安全対策まで一緒に移るわけではない。Claudeが特定のサイバー攻撃や兵器関連の要求を拒否するよう調整されていても、その回答を教材にした別モデルが同じ判断基準を持つとは限らない。能力をコピーすることと、能力を制御する仕組みをコピーすることは別物だからだ。
+
+この点、蒸留と利用者データの中継は別々の事件ではあるが、同じ問題の表裏でもある。一方では米国製モデルの能力をできるだけ取り込みたい。他方では、そのモデルを直接使っていることは利用者に見せたくない。さらに、能力を自社モデルへ移せば元のサービスが設けていた安全上の制約から離れることもできる。そうしてモデル間の境界を曖昧にしていくほど、「誰のモデルを使っているのか」「誰のルールが適用されるのか」「入力はどこへ行くのか」が利用者から見えなくなる。
+
+これはAI市場の評価方法にも影響する。「安くて高性能な国産モデル」が、実際にはより高性能な外国製モデルへ一部の処理を外注していたとすれば、そのサービスの性能をどこまで自社モデルの能力として評価してよいのか分からなくなる。ベンチマークで高得点を出したモデルと、利用者が実際に使っているサービスの処理系が同じとも限らない。AIサービスを比較するとき、モデル名だけを見ることがますます危険になる理由である。
+
+AI製品の本体は、もうモデル名ではない
+この事件が残す最大の教訓は、AI製品の「本体」が変わったことだろう。これまではGPT、Claude、Gemini、Qwen、DeepSeekといったモデル名を見て、性能や価格を比べればよかった。しかし実際のAIサービスは、複数のモデルを状況に応じて呼び分けたり、検索エンジンや外部APIを組み合わせたりする複雑なシステムになっている。画面に表示されているブランド名と、裏側でデータを処理している主体が一致するとは限らない。
+
+今後は、企業や政府がAIを調達するときに問うべきなのは、「どのモデルですか」だけではない。「入力はどの国へ送られるのか」「第三者のモデルへ転送されることがあるのか」「その場合、誰がログを保持するのか」「入力は学習に利用されるのか」。このあたりまで確認して、初めてAIサービスの実体が分かる。モデルカードだけでなく、データの流通経路そのものが製品仕様になる。</textarea>
+
+    <div class="row">
+      <div>
+        <label for="voice">ボイス</label>
+        <select id="voice" name="voice"></select>
+      </div>
+      <div>
+        <label for="model">モデル</label>
+        <select id="model" name="model"></select>
+      </div>
+      <div>
+        <label for="temperature">Temperature</label>
+        <input id="temperature" name="temperature" type="number" min="0" max="2" step="0.1" value="1">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="submit" type="submit">音声を生成</button>
+      <span class="count"><span id="count">0</span> / 20000 文字</span>
+    </div>
+
+    <div id="status" aria-live="polite"></div>
+
+    <div id="result">
+      <audio id="player" controls></audio>
+      <a id="download" class="download" download>WAV をダウンロード</a>
+    </div>
+  </form>
+
+  <footer>
+    Cloudflare Workers 上で動作。音声は
+    <a href="https://ai.google.dev/gemini-api/docs/speech-generation" target="_blank" rel="noopener">Gemini API (speech generation)</a>
+    で生成されます。
+  </footer>
+</main>
+
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const form = $("form"), text = $("text"), voice = $("voice"), model = $("model");
+  const temperature = $("temperature"), submit = $("submit"), status = $("status");
+  const result = $("result"), player = $("player"), download = $("download"), count = $("count");
+  let objectUrl = null;
+
+  const updateCount = () => { count.textContent = text.value.length; };
+  text.addEventListener("input", updateCount);
+  updateCount();
+
+  const fill = (select, items, selected) => {
+    for (const v of items) {
+      const opt = document.createElement("option");
+      opt.value = v; opt.textContent = v; opt.selected = v === selected;
+      select.appendChild(opt);
+    }
+  };
+
+  fetch("/api/voices").then((r) => r.json()).then((d) => {
+    fill(voice, d.voices, d.defaultVoice);
+    fill(model, d.models, d.defaultModel);
+  }).catch(() => {
+    fill(voice, ["Zephyr"], "Zephyr");
+    fill(model, ["gemini-2.5-pro-preview-tts"], "gemini-2.5-pro-preview-tts");
+  });
+
+  const setStatus = (msg, isError) => {
+    status.textContent = msg || "";
+    status.className = isError ? "error" : "";
+  };
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!text.value.trim()) { setStatus("テキストを入力してください。", true); return; }
+
+    submit.disabled = true;
+    result.classList.remove("show");
+    setStatus("生成中… 長い文章では 1 分ほどかかることがあります。");
+    const started = Date.now();
+
+    try {
+      const res = await fetch("/api/tts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: text.value,
+          voice: voice.value,
+          model: model.value,
+          temperature: Number(temperature.value),
+        }),
+      });
+
+      if (!res.ok) {
+        let msg = "HTTP " + res.status;
+        try { const j = await res.json(); msg = j.error || msg; if (j.text) msg += "\n" + j.text; } catch {}
+        throw new Error(msg);
+      }
+
+      const blob = await res.blob();
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = URL.createObjectURL(blob);
+      player.src = objectUrl;
+      const cd = res.headers.get("Content-Disposition") || "";
+      const m = cd.match(/filename="([^"]+)"/);
+      download.href = objectUrl;
+      download.download = m ? m[1] : "tts.wav";
+      result.classList.add("show");
+      const sec = ((Date.now() - started) / 1000).toFixed(1);
+      const kb = (blob.size / 1024).toFixed(0);
+      setStatus(`完了: ${kb} KB / ${sec} 秒 (voice: ${voice.value}, model: ${model.value})`);
+      player.play().catch(() => {});
+    } catch (err) {
+      setStatus("エラー: " + (err && err.message ? err.message : String(err)), true);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
