@@ -6,15 +6,16 @@ Web アプリとして移植したものです。
 
 - **フロントエンド** (`public/index.html`): テキスト・ボイス・モデルを指定して生成、
   ブラウザで再生 / WAV ダウンロード。Workers Static Assets で配信。
-- **Worker** (`src/index.ts`): Gemini REST API (`generateContent`,
-  `responseModalities: ["AUDIO"]`) を呼び出し、返ってきた PCM (`audio/L16;rate=24000`)
-  に WAV ヘッダを付けて返します。API キーはブラウザに露出しません。
+- **Worker** (`src/index.ts`): Gemini のストリーミング REST API
+  (`streamGenerateContent?alt=sse`, `responseModalities: ["AUDIO"]`) を呼び出し、
+  届いた PCM (`audio/L16;rate=24000`) チャンクを WAV ヘッダ付きでそのままブラウザへ
+  ストリーミングします。API キーはブラウザに露出しません。
 
 ## API
 
 | Method | Path          | 説明 |
 | ------ | ------------- | ---- |
-| `POST` | `/api/tts`    | `{ "text": "...", "voice": "Zephyr", "model": "gemini-2.5-pro-preview-tts", "temperature": 1 }` を受け取り `audio/wav` を返す |
+| `POST` | `/api/tts`    | `{ "text": "...", "voice": "Zephyr", "model": "gemini-2.5-pro-preview-tts", "temperature": 1 }` を受け取り `audio/wav` をストリーミングで返す |
 | `GET`  | `/api/voices` | 利用可能なボイス・モデル一覧 |
 
 ```sh
@@ -54,6 +55,13 @@ npm run check   # tsc --noEmit && wrangler deploy --dry-run
 ## 補足
 
 - 入力は最大 20,000 文字に制限しています（`src/index.ts` の `MAX_TEXT_LENGTH`）。
-- 長文では生成に 1 分前後かかることがあります。Workers は外部 fetch の待ち時間に
-  CPU 時間制限を消費しないため、そのまま待機できます。
+- 長文では生成に数分かかることがあります。Cloudflare は約 100 秒間 1 バイトも
+  返さないオリジンを HTTP 524 で切断するため、Gemini 呼び出しとクライアントへの
+  応答の両方をストリーミングにしています（最初の音声チャンクは数秒で届きます）。
+- ストリーミング中は WAV の長さが確定しないため、Worker が書くヘッダの RIFF / data
+  サイズは `0xFFFFFFFF`（長さ不明）です。ブラウザ側 (`public/index.html`) が受信完了後に
+  正しい値へ書き換えます。curl で保存したファイルはヘッダがそのままなので、必要なら
+  `ffmpeg -i in.wav -c copy out.wav` で正規化してください。
+- Cloudflare Access で保護している場合、curl からはサービストークン
+  (`CF-Access-Client-Id` / `CF-Access-Client-Secret` ヘッダ) が必要です。
 - 対応モデル: `gemini-2.5-pro-preview-tts`, `gemini-2.5-flash-preview-tts`。

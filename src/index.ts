@@ -1,28 +1,40 @@
 /**
  * Gemini TTS on Cloudflare Workers.
  *
- * POST /api/tts  { text, voice?, model?, temperature? }  ->  audio/wav
+ * POST /api/tts  { text, voice?, model?, temperature? }  ->  audio/wav (streamed)
  * GET  /api/voices                                        ->  { voices, models }
  * Everything else is served from ./public via the ASSETS binding.
  *
- * This is a port of the google-genai Python sample: the Worker calls the
- * Gemini REST API with responseModalities=["AUDIO"], receives raw PCM
- * (audio/L16;rate=24000) as base64, wraps it in a WAV header and returns it.
+ * This is a port of the google-genai Python sample. The Worker calls the
+ * Gemini streaming REST API (streamGenerateContent?alt=sse) with
+ * responseModalities=["AUDIO"], receives raw PCM (audio/L16;rate=24000)
+ * chunks as base64, and streams them back to the client behind a WAV header.
+ *
+ * Streaming on both hops matters: Cloudflare cuts a request with HTTP 524
+ * when the origin sends no bytes for ~100 s, and a long transcript takes
+ * longer than that to synthesize in one shot. With SSE the first audio bytes
+ * arrive within seconds, so neither hop idles.
+ *
+ * Because the total length is unknown when the header is written, the RIFF
+ * and data size fields are set to 0xFFFFFFFF ("unknown length", which most
+ * players accept). The browser client patches them once the download ends.
  */
 
 export interface Env {
   GEMINI_API_KEY: string;
+  /** Optional override, mainly for tests. Defaults to the public Gemini API. */
+  GEMINI_API_BASE?: string;
   ASSETS: Fetcher;
 }
 
-const GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
+const DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta";
 
-export const MODELS = [
+const MODELS = [
   "gemini-2.5-pro-preview-tts",
   "gemini-2.5-flash-preview-tts",
 ] as const;
 
-export const VOICES = [
+const VOICES = [
   "Zephyr", "Puck", "Charon", "Kore", "Fenrir", "Leda", "Orus", "Aoede",
   "Callirrhoe", "Autonoe", "Enceladus", "Iapetus", "Umbriel", "Algieba",
   "Despina", "Erinome", "Algenib", "Rasalgethi", "Laomedeia", "Achernar",
@@ -33,6 +45,7 @@ export const VOICES = [
 const DEFAULT_MODEL = MODELS[0];
 const DEFAULT_VOICE = "Zephyr";
 const MAX_TEXT_LENGTH = 20_000;
+const UNKNOWN_SIZE = 0xffffffff;
 
 interface TtsRequest {
   text?: unknown;
@@ -46,7 +59,7 @@ interface GeminiPart {
   inlineData?: { mimeType: string; data: string };
 }
 
-interface GeminiResponse {
+interface GeminiEvent {
   candidates?: Array<{
     content?: { parts?: GeminiPart[] };
     finishReason?: string;
@@ -56,14 +69,14 @@ interface GeminiResponse {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
     if (url.pathname === "/api/tts") {
       if (request.method !== "POST") {
         return json({ error: "Method Not Allowed" }, 405, { Allow: "POST" });
       }
-      return handleTts(request, env);
+      return handleTts(request, env, ctx);
     }
 
     if (url.pathname === "/api/voices") {
@@ -74,7 +87,7 @@ export default {
   },
 } satisfies ExportedHandler<Env>;
 
-async function handleTts(request: Request, env: Env): Promise<Response> {
+async function handleTts(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   if (!env.GEMINI_API_KEY) {
     return json({ error: "GEMINI_API_KEY is not configured on the Worker." }, 500);
   }
@@ -102,7 +115,8 @@ async function handleTts(request: Request, env: Env): Promise<Response> {
     ? body.temperature
     : 1;
 
-  const geminiRes = await fetch(`${GEMINI_BASE}/models/${model}:generateContent`, {
+  const base = (env.GEMINI_API_BASE || DEFAULT_GEMINI_BASE).replace(/\/+$/, "");
+  const upstream = await fetch(`${base}/models/${model}:streamGenerateContent?alt=sse`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -120,50 +134,136 @@ async function handleTts(request: Request, env: Env): Promise<Response> {
     }),
   });
 
-  let data: GeminiResponse;
-  try {
-    data = (await geminiRes.json()) as GeminiResponse;
-  } catch {
-    return json({ error: `Gemini API returned a non-JSON response (HTTP ${geminiRes.status}).` }, 502);
+  if (!upstream.ok) {
+    const message = await upstreamErrorMessage(upstream);
+    const status = upstream.status >= 400 && upstream.status < 500 ? upstream.status : 502;
+    return json({ error: `Gemini API error: ${message}` }, status);
+  }
+  if (!upstream.body) {
+    return json({ error: "Gemini API returned an empty response." }, 502);
   }
 
-  if (!geminiRes.ok) {
-    const message = data.error?.message ?? `HTTP ${geminiRes.status}`;
-    return json({ error: `Gemini API error: ${message}` }, geminiRes.status >= 400 && geminiRes.status < 500 ? geminiRes.status : 502);
+  // Read events until the first audio chunk so we know the sample format
+  // before committing to response headers.
+  const events = parseSse(upstream.body);
+  const pending: Uint8Array[] = [];
+  const textParts: string[] = [];
+  let mimeType: string | undefined;
+  let finishReason: string | undefined;
+
+  while (!mimeType) {
+    const { value: ev, done } = await events.next();
+    if (done) break;
+    if (ev.error?.message) {
+      return json({ error: `Gemini API error: ${ev.error.message}` }, 502);
+    }
+    if (ev.promptFeedback?.blockReason) {
+      return json({ error: `Request was blocked: ${ev.promptFeedback.blockReason}` }, 422);
+    }
+    finishReason = ev.candidates?.[0]?.finishReason ?? finishReason;
+    for (const p of ev.candidates?.[0]?.content?.parts ?? []) {
+      if (p.inlineData?.data) {
+        mimeType ??= p.inlineData.mimeType;
+        pending.push(base64ToBytes(p.inlineData.data));
+      } else if (p.text) {
+        textParts.push(p.text);
+      }
+    }
   }
 
-  if (data.promptFeedback?.blockReason) {
-    return json({ error: `Request was blocked: ${data.promptFeedback.blockReason}` }, 422);
-  }
-
-  const parts = data.candidates?.[0]?.content?.parts ?? [];
-  const audioParts = parts.filter((p) => p.inlineData?.data);
-  if (audioParts.length === 0) {
-    const textOut = parts.map((p) => p.text).filter(Boolean).join("\n");
-    const reason = data.candidates?.[0]?.finishReason;
+  if (!mimeType) {
     return json(
-      { error: "Gemini returned no audio.", finishReason: reason, text: textOut || undefined },
+      { error: "Gemini returned no audio.", finishReason, text: textParts.join("\n") || undefined },
       502,
     );
   }
 
-  const mimeType = audioParts[0].inlineData!.mimeType;
-  const pcm = concat(audioParts.map((p) => base64ToBytes(p.inlineData!.data)));
-  const isWav = /^audio\/(wav|x-wav|wave)/i.test(mimeType);
-  const wav = isWav ? pcm : toWav(pcm, mimeType);
+  const { bitsPerSample, rate } = parseAudioMimeType(mimeType);
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+
+  const pump = async () => {
+    const writer = writable.getWriter();
+    try {
+      await writer.write(wavHeader(UNKNOWN_SIZE, bitsPerSample, rate));
+      for (const chunk of pending) await writer.write(chunk);
+      for (;;) {
+        const { value: ev, done } = await events.next();
+        if (done) break;
+        if (ev.error?.message) throw new Error(`Gemini API error mid-stream: ${ev.error.message}`);
+        for (const p of ev.candidates?.[0]?.content?.parts ?? []) {
+          if (p.inlineData?.data) await writer.write(base64ToBytes(p.inlineData.data));
+        }
+      }
+      await writer.close();
+    } catch (err) {
+      console.error("tts stream failed", err);
+      await writer.abort(err).catch(() => {});
+    }
+  };
+  ctx.waitUntil(pump());
 
   const filename = `tts-${voice.toLowerCase()}-${timestamp()}.wav`;
-  return new Response(wav, {
+  return new Response(readable, {
     headers: {
       "Content-Type": "audio/wav",
-      "Content-Length": String(wav.byteLength),
       "Content-Disposition": `attachment; filename="${filename}"`,
       "Cache-Control": "no-store",
+      "X-Sample-Rate": String(rate),
+      "X-Bits-Per-Sample": String(bitsPerSample),
       "X-Gemini-Model": model,
       "X-Gemini-Voice": voice,
       "X-Source-Mime-Type": mimeType,
     },
   });
+}
+
+async function upstreamErrorMessage(res: Response): Promise<string> {
+  const raw = await res.text().catch(() => "");
+  try {
+    const parsed = JSON.parse(raw);
+    const err = Array.isArray(parsed) ? parsed[0]?.error : parsed?.error;
+    if (err?.message) return String(err.message);
+  } catch {
+    /* not JSON */
+  }
+  return `HTTP ${res.status}`;
+}
+
+/** Yields one parsed JSON object per `data:` line of a text/event-stream body. */
+export async function* parseSse(body: ReadableStream<Uint8Array>): AsyncGenerator<GeminiEvent> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const parseLine = (line: string): GeminiEvent | undefined => {
+    if (!line.startsWith("data:")) return undefined;
+    const payload = line.slice(5).trim();
+    if (!payload || payload === "[DONE]") return undefined;
+    try {
+      return JSON.parse(payload) as GeminiEvent;
+    } catch {
+      console.warn("skipping malformed SSE line", payload.slice(0, 120));
+      return undefined;
+    }
+  };
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buffer.indexOf("\n")) !== -1) {
+        const ev = parseLine(buffer.slice(0, nl).replace(/\r$/, ""));
+        buffer = buffer.slice(nl + 1);
+        if (ev) yield ev;
+      }
+      if (done) {
+        const ev = parseLine(buffer.replace(/\r$/, ""));
+        if (ev) yield ev;
+        return;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
 
 /** Parses "audio/L16;codec=pcm;rate=24000" -> { bitsPerSample: 16, rate: 24000 }. */
@@ -183,19 +283,21 @@ export function parseAudioMimeType(mimeType: string): { bitsPerSample: number; r
   return { bitsPerSample, rate };
 }
 
-/** Prepends a 44-byte RIFF/WAVE header (mono PCM) to raw audio samples. */
-export function toWav(audio: Uint8Array, mimeType: string): Uint8Array {
-  const { bitsPerSample, rate } = parseAudioMimeType(mimeType);
+/**
+ * Builds a 44-byte RIFF/WAVE header for mono PCM. Pass UNKNOWN_SIZE as
+ * dataSize when streaming; both size fields then read 0xFFFFFFFF.
+ */
+export function wavHeader(dataSize: number, bitsPerSample: number, rate: number): Uint8Array {
   const numChannels = 1;
   const bytesPerSample = bitsPerSample / 8;
   const blockAlign = numChannels * bytesPerSample;
   const byteRate = rate * blockAlign;
-  const dataSize = audio.byteLength;
+  const riffSize = dataSize === UNKNOWN_SIZE ? UNKNOWN_SIZE : 36 + dataSize;
 
-  const header = new ArrayBuffer(44);
-  const v = new DataView(header);
+  const header = new Uint8Array(44);
+  const v = new DataView(header.buffer);
   writeAscii(v, 0, "RIFF");
-  v.setUint32(4, 36 + dataSize, true);
+  v.setUint32(4, riffSize, true);
   writeAscii(v, 8, "WAVE");
   writeAscii(v, 12, "fmt ");
   v.setUint32(16, 16, true); // Subchunk1Size (PCM)
@@ -207,9 +309,14 @@ export function toWav(audio: Uint8Array, mimeType: string): Uint8Array {
   v.setUint16(34, bitsPerSample, true);
   writeAscii(v, 36, "data");
   v.setUint32(40, dataSize, true);
+  return header;
+}
 
-  const out = new Uint8Array(44 + dataSize);
-  out.set(new Uint8Array(header), 0);
+/** Prepends a complete WAV header (known length) to raw PCM samples. */
+export function toWav(audio: Uint8Array, mimeType: string): Uint8Array {
+  const { bitsPerSample, rate } = parseAudioMimeType(mimeType);
+  const out = new Uint8Array(44 + audio.byteLength);
+  out.set(wavHeader(audio.byteLength, bitsPerSample, rate), 0);
   out.set(audio, 44);
   return out;
 }
@@ -222,18 +329,6 @@ function base64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-function concat(chunks: Uint8Array[]): Uint8Array {
-  if (chunks.length === 1) return chunks[0];
-  const total = chunks.reduce((n, c) => n + c.byteLength, 0);
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const c of chunks) {
-    out.set(c, offset);
-    offset += c.byteLength;
-  }
   return out;
 }
 
